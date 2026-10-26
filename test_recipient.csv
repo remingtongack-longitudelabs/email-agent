@@ -1,0 +1,6 @@
+to,subject,body
+remington.gack@longitudelabs.com,"[TEST] gmail_drafts attachment check","Hi Remington,
+
+This is a test of gmail_drafts.py. If the one-pager PDF is attached with its original filename and opens correctly, the pipeline works.
+
+- Test"

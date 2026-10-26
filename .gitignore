@@ -1,0 +1,27 @@
+# Secrets and runtime state: never commit these
+client_secret*.json
+credentials.json
+token.json
+*.token
+state/
+ledger.jsonl
+*.log
+# Real recipient lists / PDFs
+*.pdf
+recipients.csv
+__pycache__/
+.venv/
+.ruff_cache/
+.mypy_cache/
+state_test/
+*.egg-info/
+build/
+dist/
+state_*/
+recipients_*.csv
+*.local.csv
+.env
+.env.*
+*.pem
+.DS_Store
+.claude/
