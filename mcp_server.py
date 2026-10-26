@@ -325,7 +325,7 @@ async def _send(ctx: Any, confirm_token: str, expected_count: int, csv: str, att
             if binding_of(sendable, ledger) != bound:
                 raise PermissionError("The drafts or recipients changed during confirmation. Nothing sent.")
             with gd.capture_json() as sink:
-                summary = gd.run_send(sendable, ledger, service)
+                summary = gd.run_send(sendable, ledger, service, extra={"gate": method})
                 gd.finish(args, "Send run", summary, sendable, ledger)
         finally:
             gd.release_locks()

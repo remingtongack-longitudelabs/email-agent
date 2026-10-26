@@ -64,6 +64,7 @@ class McpBase(unittest.TestCase):
                    mock.patch.object(ms, "service_factory", lambda: self.g),
                    mock.patch.object(ms, "TOKENS", ms.SendTokens(clock=self.clock)),
                    mock.patch.dict(os.environ, {"GMAIL_DRAFTS_ALLOW_YES": ""})]
+        os.environ.pop("GMAIL_DRAFTS_ATTACH_ROOTS", None)  # a dev shell may set it; tests use temp dirs
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
@@ -256,6 +257,23 @@ class SendGateTests(McpBase):
             res = self.send(p["confirm_token"], 3, ctx)
             self.assertIn("refused", res)
             self.assertEqual(self.g.send_calls, 0)
+
+    def test_gate_is_recorded_in_ledger_and_report(self):
+        for ctx, gate in ((FakeCtx(supports=False), "tool_permission_prompt"),):
+            p = self.prepare()
+            self.send(p["confirm_token"], 3, ctx)
+            sent = [e for e in gd.Ledger(ms.state_dir_for("t1") / "ledger.jsonl").events
+                    if e["status"] in (gd.SENDING, gd.SENT)]
+            self.assertEqual(len(sent), 6)
+            self.assertTrue(all(e["gate"] == gate for e in sent))
+            rows = ms.report(batch="t1", statuses=["sent"])["rows"]
+            self.assertTrue(rows and all(r["gate"] == gate for r in rows))
+
+    def test_gate_recorded_for_elicitation(self):
+        p = self.prepare()
+        self.send(p["confirm_token"], 3, FakeCtx(supports=True, answer=3))
+        evs = [e for e in gd.Ledger(ms.state_dir_for("t1") / "ledger.jsonl").events if e["status"] == gd.SENT]
+        self.assertTrue(evs and all(e["gate"] == "elicitation" for e in evs))
 
     def test_require_elicitation_env(self):
         p = self.prepare()

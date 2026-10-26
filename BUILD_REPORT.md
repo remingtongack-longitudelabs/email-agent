@@ -123,3 +123,15 @@ These are options, not commitments; the planner should pick and order them. Anyt
 | 8 | Optional: per-recipient sending pace / daily cap to stay under Gmail sending limits on large runs | Large-batch safety | Expected batch sizes |
 
 Out of scope unless asked: calendar invites, CRM updates, hosted-link attachments, widening the OAuth scope beyond `gmail.compose`.
+
+## Update after planner review (2026-10-26)
+
+Answers from Remington: the OAuth consent screen is **Internal** (no 7-day token expiry); `send` is set to **Allow once** in Claude Desktop.
+
+- **Which Desktop gate fired:** the earlier app-side send showed only the plain Allow button, so **Claude Desktop does not support MCP elicitation**. The app-side gate is the one-click tool-permission prompt. Remington chose this explicitly, so MCP `send` still works without elicitation (`GMAIL_MCP_REQUIRE_ELICITATION=1` remains an opt-in to refuse).
+- **Gate now recorded:** MCP `send` writes `gate` (`elicitation` or `tool_permission_prompt`) on every send event in the ledger; `report` and `status` output include it.
+- **Failed sends and duplicates:** a sent draft disappears from Gmail, so the existing pre-send `drafts.get` check already stopped a retry from re-sending after a 4xx that actually went through. That case is now labelled correctly: a `send_failed` row whose draft is gone becomes `send_unknown` ("may have been sent, check Sent"), not `draft_missing`. `reconcile` applies the same check to `send_failed` rows.
+- **Attachment allow-list set:** `GMAIL_DRAFTS_ATTACH_ROOTS=/Users/remington.gack/Documents/work/longitude-labs/canonical-attachments`, in the Claude Desktop MCP config (backup `claude_desktop_config.json.bak-attachroots-20261026`) and `~/.zshrc`. It also applies to the CSV and template paths the MCP tools accept, so recipient CSVs must live under that folder too. Widen later by adding folders separated by `:`.
+- **Hygiene:** stray test artifacts removed; `.gitignore` covers secrets, state, PDFs, recipient lists, venv, caches; repo under git on `main`.
+- **Tests:** 75 pass (6 new), ruff and mypy clean. The suite clears `GMAIL_DRAFTS_ATTACH_ROOTS` so a dev shell setting does not break it.
+- **Still true:** nothing has been sent to anyone except remington.gack@longitudelabs.com; the "4xx on send always means not sent" assumption remains unproven but is now hedged as above.

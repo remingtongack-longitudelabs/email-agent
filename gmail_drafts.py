@@ -476,6 +476,15 @@ def run_draft(rows: list[Row], pdf: Attachment | None, ledger: Ledger, service, 
     return summary
 
 
+def gone_status(ledger: Ledger, key: str) -> tuple[str, str]:
+    """Status for a row whose Gmail draft no longer exists. A sent draft disappears, so if an earlier send
+    attempt returned a 4xx we cannot assume it failed: flag it as uncertain instead of 'deleted'."""
+    if ledger.status(key) == SEND_FAILED:
+        return SEND_UNKNOWN, ("an earlier send attempt got an HTTP 4xx and the draft is now gone: it may have "
+                              "been sent. Check Sent, then `resolve`")
+    return DRAFT_MISSING, "draft not found in Gmail (deleted?)"
+
+
 def verify_sendable(rows: list[Row], ledger: Ledger, service) -> list[Row]:
     """Rows whose Gmail draft is confirmed to still exist (so the typed SEND <n> count is accurate).
 
@@ -495,7 +504,8 @@ def verify_sendable(rows: list[Row], ledger: Ledger, service) -> list[Row]:
         except Exception as exc:  # noqa: BLE001
             _, desc = classify_error(exc)
             if desc == "HTTP 404":
-                ledger.record(r.key, DRAFT_MISSING, note="draft not found in Gmail (deleted?)")
+                new_status, note = gone_status(ledger, r.key)
+                ledger.record(r.key, new_status, note=note)
                 log.error("NEEDS REVIEW %s [%s]: draft %s no longer exists; not sent", r.to, r.key[:12], draft_id)
             else:
                 log.error("SKIPPED %s [%s]: could not verify draft (%s); nothing was sent", r.to, r.key[:12], desc)
@@ -505,7 +515,9 @@ def verify_sendable(rows: list[Row], ledger: Ledger, service) -> list[Row]:
 
 
 def run_send(rows: list[Row], ledger: Ledger, service, *, limit: int | None = None,
-             max_consecutive_failures: int = 3, pause: float = 0.5) -> Counter:
+             max_consecutive_failures: int = 3, pause: float = 0.5, extra: dict | None = None) -> Counter:
+    """`extra` fields (e.g. which confirmation gate approved this send) are recorded on every send event."""
+    extra = extra or {}
     summary: Counter = Counter()
     consecutive = 0
     done = 0
@@ -534,7 +546,8 @@ def run_send(rows: list[Row], ledger: Ledger, service, *, limit: int | None = No
         except Exception as exc:  # noqa: BLE001
             definite, desc = classify_error(exc)
             if desc == "HTTP 404":
-                ledger.record(r.key, DRAFT_MISSING, note="draft not found in Gmail (deleted?)")
+                new_status, note = gone_status(ledger, r.key)
+                ledger.record(r.key, new_status, note=note)
                 log.error("NEEDS REVIEW %s [%s]: draft %s no longer exists; not sent", r.to, r.key[:12], draft_id)
                 summary["needs_review"] += 1
             else:
@@ -546,17 +559,17 @@ def run_send(rows: list[Row], ledger: Ledger, service, *, limit: int | None = No
                 break
             continue
         # Write-ahead marker: if we crash after this line, the row is treated as uncertain.
-        ledger.record(r.key, SENDING, draft_id=draft_id)
+        ledger.record(r.key, SENDING, draft_id=draft_id, **extra)
         try:
             resp = service.users().drafts().send(userId="me", body={"id": draft_id}).execute(num_retries=0)
         except Exception as exc:  # noqa: BLE001
             definite, desc = classify_error(exc)
             if definite:
-                ledger.record(r.key, SEND_FAILED, note=desc)
+                ledger.record(r.key, SEND_FAILED, note=desc, **extra)
                 log.error("SEND FAILED %s [%s]: %s (draft intact; can be re-run)", r.to, r.key[:12], desc)
                 summary["failed"] += 1
             else:
-                ledger.record(r.key, SEND_UNKNOWN, note=desc)
+                ledger.record(r.key, SEND_UNKNOWN, note=desc, **extra)
                 log.error("SEND UNCERTAIN %s [%s]: %s. Check your Sent folder, then `resolve`. NOT retried.",
                           r.to, r.key[:12], desc)
                 summary["failed"] += 1
@@ -570,7 +583,7 @@ def run_send(rows: list[Row], ledger: Ledger, service, *, limit: int | None = No
                 break
             continue
         consecutive = 0
-        ledger.record(r.key, SENT, message_id=resp.get("id"), thread_id=resp.get("threadId"))
+        ledger.record(r.key, SENT, message_id=resp.get("id"), thread_id=resp.get("threadId"), **extra)
         log.info("SENT %s [%s] message_id=%s thread_id=%s", r.to, r.key[:12], resp.get("id"), resp.get("threadId"))
         summary["sent"] += 1
         time.sleep(pause)
@@ -700,7 +713,7 @@ def row_report(rows: list[Row], ledger: Ledger) -> list[dict]:
     for r in rows:
         ev = ledger.event(r.key)
         item = {"key": r.key[:12], "to": r.to, "subject": r.subject, "status": ledger.status(r.key) or "new"}
-        for k in ("draft_id", "message_id", "thread_id", "note"):
+        for k in ("draft_id", "message_id", "thread_id", "gate", "note"):
             if ev.get(k):
                 item[k] = ev[k]
         out.append(item)
@@ -873,6 +886,18 @@ def run_reconcile(rows: list[Row], ledger: Ledger, service, *, min_age: float = 
                 log.info("NOT FOUND %s [%s]: no draft carries its marker (scanned %d). It was most likely never "
                          "created; `resolve --as cleared` to retry.", r.to, r.key[:12], scanned)
                 summary["not_found"] += 1
+    for r in rows:  # a 4xx on send is only presumed to mean "not sent": if the draft is gone, flag it
+        if ledger.status(r.key) != SEND_FAILED or not ledger.event(r.key).get("draft_id"):
+            continue
+        try:
+            service.users().drafts().get(userId="me", id=ledger.event(r.key)["draft_id"], format="minimal").execute(
+                num_retries=READ_RETRIES)
+        except Exception as exc:  # noqa: BLE001
+            if classify_error(exc)[1] == "HTTP 404":
+                new_status, note = gone_status(ledger, r.key)
+                ledger.record(r.key, new_status, note=note)
+                log.error("NEEDS REVIEW %s [%s]: %s", r.to, r.key[:12], note)
+                summary["needs_review"] += 1
     for r in rows:
         if ledger.status(r.key) != SEND_UNKNOWN:
             continue
@@ -970,7 +995,7 @@ def cmd_reconcile(args, service_factory) -> int:
 def cmd_report(args) -> int:
     """Export the ledger (latest state per message) as CSV/JSON, to write results back to other systems."""
     ledger = Ledger(Path(args.state_dir) / "ledger.jsonl")
-    fields = ["key", "to", "subject", "status", "draft_id", "message_id", "thread_id", "ts", "note"]
+    fields = ["key", "to", "subject", "status", "draft_id", "message_id", "thread_id", "gate", "ts", "note"]
     items = []
     for key, ev in ledger.latest.items():
         st = ledger.status(key)

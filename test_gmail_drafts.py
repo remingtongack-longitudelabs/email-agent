@@ -115,6 +115,10 @@ FakeCall = FakeGmail._Call
 
 class Base(unittest.TestCase):
     def setUp(self):
+        env = mock.patch.dict(os.environ, {"GMAIL_DRAFTS_ALLOW_YES": "1"})  # tests opt in; production default is off
+        env.start()
+        os.environ.pop("GMAIL_DRAFTS_ATTACH_ROOTS", None)  # a dev shell may set it; tests use temp dirs
+        self.addCleanup(env.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         self.pdf_path = self.dir / "One Pager – Résumé.pdf"  # non-ASCII filename on purpose
@@ -129,9 +133,6 @@ class Base(unittest.TestCase):
         self.pdf = gd.load_pdf(self.pdf_path)
         self.rows = gd.load_rows(self.csv, self.pdf)
         gd.setup_logging(self.state)
-        env = mock.patch.dict(os.environ, {"GMAIL_DRAFTS_ALLOW_YES": "1"})  # tests opt in; production default is off
-        env.start()
-        self.addCleanup(env.stop)
 
     def tearDown(self):
         for h in list(gd.log.handlers):
@@ -631,6 +632,49 @@ class AgentSafetyTests(Base):
             with self.assertRaises(SystemExit):  # --json can never prompt
                 self.cli("--json", "send", "--csv", str(self.csv), "--pdf", str(self.pdf_path), svc=g)
         self.assertEqual(g.send_calls, 0)
+
+
+class FailedSendRecoveryTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.g = FakeGmail()
+        gd.run_draft(self.rows, self.pdf, self.ledger(), self.g, pause=0)
+        self.key = self.rows[0].key
+        self.did = self.ledger().event(self.key)["draft_id"]
+        self.g.fail_send[self.did] = FakeHttpError(400)
+        gd.run_send(self.rows, self.ledger(), self.g, pause=0)
+        self.assertEqual(self.ledger().status(self.key), gd.SEND_FAILED)
+        del self.g.fail_send[self.did]
+
+    def test_failed_send_whose_draft_vanished_is_flagged_not_resent(self):
+        self.g.store.pop(self.did)  # the "4xx" actually went through: a sent draft disappears
+        before = self.g.send_calls
+        ok = gd.verify_sendable(self.rows, self.ledger(), self.g)
+        self.assertNotIn(self.key, [r.key for r in ok])
+        self.assertEqual(self.ledger().status(self.key), gd.SEND_UNKNOWN)
+        self.assertIn("may have been sent", self.ledger().event(self.key)["note"])
+        gd.run_send(self.rows, self.ledger(), self.g, pause=0)
+        self.assertEqual(self.g.send_calls, before)
+
+    def test_failed_send_with_intact_draft_is_retried(self):
+        s = gd.run_send(self.rows, self.ledger(), self.g, pause=0)
+        self.assertEqual(self.ledger().status(self.key), gd.SENT)
+        self.assertEqual(s["sent"], 1)
+
+    def test_reconcile_flags_failed_send_with_missing_draft(self):
+        self.g.store.pop(self.did)
+        s = gd.run_reconcile(self.rows, self.ledger(), self.g, min_age=0)
+        self.assertEqual(self.ledger().status(self.key), gd.SEND_UNKNOWN)
+        self.assertEqual(s["needs_review"], 1)
+        before = self.g.send_calls
+        gd.run_send(self.rows, self.ledger(), self.g, pause=0)
+        self.assertEqual(self.g.send_calls, before)
+
+    def test_run_send_records_extra_fields_on_every_send_event(self):
+        gd.run_send(self.rows, self.ledger(), self.g, pause=0, extra={"gate": "elicitation"})
+        evs = [e for e in self.ledger().events if e["key"] == self.key][-2:]  # the retry's marker + result
+        self.assertEqual([e["status"] for e in evs], [gd.SENDING, gd.SENT])
+        self.assertTrue(all(e["gate"] == "elicitation" for e in evs))
 
 
 

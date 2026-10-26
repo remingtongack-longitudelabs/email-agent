@@ -201,6 +201,11 @@ needs a tty and `--yes` stays disabled unless `GMAIL_DRAFTS_ALLOW_YES=1`). Extra
 `GMAIL_DRAFTS_ATTACH_ROOTS` in the server's `env` so only your document folders can be attached or used as
 CSV/templates. Credential-looking files and protected directories are always refused.
 
+With `GMAIL_DRAFTS_ATTACH_ROOTS` set, the same folders also limit where the CSV and template paths passed to the
+MCP tools may live, so keep recipient CSVs inside an allowed folder. Every send records which gate approved it
+(`gate` in the ledger, `status` and `report`). Claude Desktop does not currently support elicitation, so there the
+gate is the one-click permission prompt: use **Allow once**.
+
 Debugging: Claude Desktop logs the server under `~/Library/Logs/Claude/mcp-server-gmail-drafts.log`.
 Nothing is ever printed to stdout except protocol messages.
 
